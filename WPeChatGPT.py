@@ -9,8 +9,11 @@ import threading
 import json
 import httpx
 import sys, os
-# 使用新的google-genai库
-from google import genai
+# Optional dependency for Gemini only
+try:
+    from google import genai
+except ImportError:
+    genai = None
 
 # Windows
 path = os.path.dirname(os.path.abspath(__file__)) + "\\Auto-WPeGPT_WPeace\\"
@@ -30,51 +33,34 @@ ZH_CN = True
 # PLUGIN_NAME="WPeChat-DeepSeek-DouYin"
 # Use GPTAPI.US
 # PLUGIN_NAME='WPeChat-GPTAPI-US'
-# Use Gemini
-PLUGIN_NAME = 'WPeChat-Gemini'
+# Use LM Studio
+PLUGIN_NAME = "WPeChat"
 
 # Set your API key here, or put in in the model_api_key environment variable.
-model_api_key = "ENTER_API_KEY_HERE"
+model_api_key = "lm-studio"
 
 # Set your forward-proxy if necessary. (e.g. Clash = http://127.0.0.1:7890 Clash Verge = http://127.0.0.1:7897)
 proxy = ""
 # Set reverse-proxy-URL or custom-api-URL if you need. (e.g. Azure OpenAI)
-proxy_address = ""
+proxy_address = "http://localhost:1234/v1"
 
 # Plugin information, you can change the model here.
-if PLUGIN_NAME == "WPeChat-GPT":
-    PROD_NAME = 'ChatGPT'
-    MODEL = 'gpt-4'
-    print("WPeChatGPT is using ChatGPT.")
-
-elif PLUGIN_NAME == "WPeChat-DeepSeek":
-    PROD_NAME = 'DeepSeek'
-    MODEL = 'deepseek-chat'
-    print("WPeChatGPT is using DeepSeek")
-
-elif PLUGIN_NAME == "WPeChat-DeepSeek-DouYin":
-    PROD_NAME = 'DeepSeek-DouYin'
-    MODEL = 'ep-20250220112658-w954b'
-    print("WPeChatGPT is using DeepSeek-DouYin")
-
-elif PLUGIN_NAME == "WPeChat-GPTAPI-US":
-    PROD_NAME = 'GPTAPI-US'
-    MODEL = 'deepseek-r1'
-    print("WPeChatGPT is using GPTAPI-US")
-
-elif PLUGIN_NAME == "WPeChat-Gemini":
-    PROD_NAME = 'Gemini'
-    MODEL = 'gemini-2.5-flash'  # 推荐使用flash版本，更稳定
-    print("WPeChatGPT is using Gemini")
+PROD_NAME = "LM_studio"
+MODEL = "gpt-oss:20b"
+print("WPeChatGPT is using LM Studio.")
 
 # Create openai client (python openai package version > 1.2)
-if PROD_NAME == "DeepSeek":
+if PROD_NAME == "LM_studio":
+    client = openai.OpenAI(base_url=proxy_address, api_key=model_api_key)
+elif PROD_NAME == "DeepSeek":
     client = openai.OpenAI(base_url="https://api.deepseek.com", api_key=model_api_key)
 elif PROD_NAME == "DeepSeek-DouYin":
     client = openai.OpenAI(base_url="https://ark.cn-beijing.volces.com/api/v3", api_key=model_api_key)
 elif PROD_NAME == "GPTAPI-US":
     client = openai.OpenAI(base_url="https://api.gptapi.us/v1/chat/completions", api_key=model_api_key)
 elif PROD_NAME == "Gemini":
+    if genai is None:
+        raise ImportError("Gemini mode requires `google-genai`. Please install it or switch PROD_NAME.")
     # 使用新的google-genai库配置
     client = genai.Client(api_key=model_api_key)
 elif proxy:
@@ -95,8 +81,9 @@ class ExplainHandler(idaapi.action_handler_t):
         idaapi.action_handler_t.__init__(self)
 
     def activate(self, ctx):
-        funcComment = getFuncComment(idaapi.get_screen_ea())
-        if "---WPeChat_START---" in funcComment:
+        current_ea = idaapi.get_screen_ea()
+        funcComment = getFuncComment(current_ea)
+        if "---WPeChat_START---" in str(funcComment):
             if ZH_CN:
                 print("当前函数已经完成过 %s:Explain 分析，请查看注释或删除注释重新分析。@WPeace" % (PLUGIN_NAME))
             else:
@@ -104,21 +91,48 @@ class ExplainHandler(idaapi.action_handler_t):
                     "The current function has been analyzed by %s:Explain, please check the comment or delete the comment to re-analyze. @WPeace" % (
                         PLUGIN_NAME))
             return 0
-        decompiler_output = ida_hexrays.decompile(idaapi.get_screen_ea())
+        decompiler_output = ida_hexrays.decompile(current_ea)
+        assembly_output = get_function_assembly(current_ea)
         v = ida_hexrays.get_widget_vdui(ctx.widget)
         # 中文
         if ZH_CN:
+            query_text = (
+                "你是一个资深逆向工程分析助手。请综合下面给出的[伪代码]和[函数整体汇编]进行分析，"
+                "并严格按以下结构输出，使用简体中文：\n"
+                "---WPeChat_START---\n"
+                "1. 函数用途概述：用2-4句总结函数核心目的。\n"
+                "2. 参数与返回值：逐项说明参数/返回值可能含义（不确定请标注“推测”）。\n"
+                "3. 关键执行流程：按步骤说明关键分支、循环、调用点。\n"
+                "4. 关键证据：列出支持判断的伪代码/汇编线索（简要引用地址或指令特征）。\n"
+                "5. 风险点或可疑行为：若存在内存操作、校验绕过、危险API等请指出。\n"
+                "6. 建议函数名：给出1个最推荐函数名，并附2-3个备选名。\n"
+                "---WPeChat_END---\n"
+                "\n[伪代码]\n" + str(decompiler_output) +
+                "\n\n[函数整体汇编]\n" + assembly_output
+            )
             query_model_async(
-                "下面是一个C语言伪代码函数，分别分析该函数的预期目的、参数的作用、详细功能，最后取一个新的函数名字。（用简体中文回答我，并且回答开始前加上'---WPeChat_START---'字符串结束后加上'---WPeChat_END---'字符串）\n"
-                + str(decompiler_output),
-                functools.partial(comment_callback, address=idaapi.get_screen_ea(), view=v, cmtFlag=0, printFlag=0),
+                query_text,
+                functools.partial(comment_callback, address=current_ea, view=v, cmtFlag=0, printFlag=0),
                 0)
         # English
         else:
+            query_text = (
+                "You are a senior reverse-engineering assistant. Analyze the function using both [Pseudocode] and "
+                "[Full Function Assembly], and strictly follow this output format in English:\n"
+                "---WPeChat_START---\n"
+                "1. Function summary: 2-4 sentences about core purpose.\n"
+                "2. Parameters and return value: explain each item; mark uncertain parts as \"inferred\".\n"
+                "3. Key execution flow: step-by-step control/data flow, branches, loops, and calls.\n"
+                "4. Key evidence: cite concise pseudocode/assembly clues (addresses or instruction patterns).\n"
+                "5. Risks or suspicious behavior: memory issues, bypass logic, dangerous APIs, etc.\n"
+                "6. Suggested function name: provide one best name and 2-3 alternatives.\n"
+                "---WPeChat_END---\n"
+                "\n[Pseudocode]\n" + str(decompiler_output) +
+                "\n\n[Full Function Assembly]\n" + assembly_output
+            )
             query_model_async(
-                "Analyze the following C language pseudo-code function, respectively speculate on the use environment, expected purpose, and detailed function of the function, and finally choose a new name for this function. (add '---WPeChat_START---' string before the beginning of the answer and add '---WPeChat_END---' string after the end)\n" + str(
-                    decompiler_output),
-                functools.partial(comment_callback, address=idaapi.get_screen_ea(), view=v, cmtFlag=0, printFlag=0), 0)
+                query_text,
+                functools.partial(comment_callback, address=current_ea, view=v, cmtFlag=0, printFlag=0), 0)
         return 1
 
     def update(self, ctx):
@@ -565,6 +579,23 @@ def getAddrComment(address):
     if not cmt:
         cmt = idc.get_cmt(address, 1)
     return cmt
+
+
+def get_function_assembly(address):
+    """
+    Get all disassembly lines for the function that contains `address`.
+    """
+    func = idaapi.get_func(address)
+    if not func:
+        return ""
+    lines = []
+    ea = func.start_ea
+    while ea != idaapi.BADADDR and ea < func.end_ea:
+        disasm = idc.generate_disasm_line(ea, 0)
+        if disasm:
+            lines.append("%s: %s" % (hex(ea), idaapi.tag_remove(disasm)))
+        ea = idc.next_head(ea, func.end_ea)
+    return "\n".join(lines)
 
 
 # Add context menu actions
