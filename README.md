@@ -5,6 +5,10 @@
 
 - **Features** currently supported by *WPeChatGPT* include:
     - Analyze the usage environment, intended purpose, and function of the function.
+    - **Enhanced function analysis**: Comprehensive analysis combining pseudocode, full assembly code, cross-references, strings, and metadata.
+    - **Cross-reference analysis**: Automatically identify function callers and callees to understand the function's position in the program.
+    - **String extraction**: Automatically extract all strings referenced in the function to assist in behavior analysis.
+    - **Function metadata**: Display function size, type (import/export/internal), segment, basic block count, and other detailed information.
     - Rename variables of functions.
     - Attempt to restore the function with python3, this function is mainly for functions of smaller blocks (such as an XOR decryption function).
     - Look for vulnerabilities in the current function.
@@ -26,6 +30,7 @@ ChatGPT's analysis results **for reference only**, otherwise we analysts would b
 |2.4|2023-11-10|1. Changed some display details.<br>2. Update **Auto-WPeGPT v0.2**.|
 |2.5|2024-08-07|1. Add support for other models, you can set this using the *MODEL* variable. @tpsnt<br>2. Support for the new version of the python openai package. (Need to update your openai package)|
 |2.6|2025-02-17|Add support for DeepSeek, you need to set the variable *PLUGIN_NAME* to WPeChat-DeepSeek and fill the API KEY into variable *model_api_key*.<br>(The default model is DeepSeek-V3. If you want to use the R1 model, modify variable **MODEL** = *'deepseek-reasoner'*.)|
+|2.7|2025-03-11|1. **Enhanced function analysis**: Added cross-reference (xrefs) analysis to show function callers and callees.<br>2. **String extraction**: Automatically extract and display all strings referenced in the function.<br>3. **Function metadata**: Display function size, type, segment information, basic block count, and other details.<br>4. **Full assembly analysis**: Provide both pseudocode and full assembly code during analysis.<br>5. **LM Studio support**: Default configuration now supports local LM Studio models.|
 ## Install
 1. Run the following command to install the required packages.
 ```
