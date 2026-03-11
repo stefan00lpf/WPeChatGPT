@@ -3,6 +3,7 @@ import idaapi
 import ida_hexrays
 import ida_kernwin
 import idc
+import idautils
 import openai
 import re
 import threading
@@ -93,20 +94,27 @@ class ExplainHandler(idaapi.action_handler_t):
             return 0
         decompiler_output = ida_hexrays.decompile(current_ea)
         assembly_output = get_function_assembly(current_ea)
+        xrefs_info = get_function_xrefs(current_ea)
+        strings_info = get_function_strings(current_ea)
+        metadata_info = get_function_metadata(current_ea)
         v = ida_hexrays.get_widget_vdui(ctx.widget)
         # 中文
         if ZH_CN:
             query_text = (
-                "你是一个资深逆向工程分析助手。请综合下面给出的[伪代码]和[函数整体汇编]进行分析，"
+                "你是一个资深逆向工程分析助手。请综合下面给出的所有信息进行分析，"
                 "并严格按以下结构输出，使用简体中文：\n"
                 "---WPeChat_START---\n"
                 "1. 函数用途概述：用2-4句总结函数核心目的。\n"
                 "2. 参数与返回值：逐项说明参数/返回值可能含义（不确定请标注“推测”）。\n"
                 "3. 关键执行流程：按步骤说明关键分支、循环、调用点。\n"
-                "4. 关键证据：列出支持判断的伪代码/汇编线索（简要引用地址或指令特征）。\n"
-                "5. 风险点或可疑行为：若存在内存操作、校验绕过、危险API等请指出。\n"
-                "6. 建议函数名：给出1个最推荐函数名，并附2-3个备选名。\n"
+                "4. 调用关系分析：基于交叉引用信息，说明此函数在程序中的位置和作用。\n"
+                "5. 关键证据：列出支持判断的伪代码/汇编/字符串线索（简要引用地址或指令特征）。\n"
+                "6. 风险点或可疑行为：若存在内存操作、校验绕过、危险API等请指出。\n"
+                "7. 建议函数名：给出1个最推荐函数名，并附2-3个备选名。\n"
                 "---WPeChat_END---\n"
+                "\n[函数元数据]\n" + metadata_info +
+                "\n\n[交叉引用信息]\n" + xrefs_info +
+                ("\n\n" + strings_info if strings_info else "") +
                 "\n[伪代码]\n" + str(decompiler_output) +
                 "\n\n[函数整体汇编]\n" + assembly_output
             )
@@ -117,17 +125,21 @@ class ExplainHandler(idaapi.action_handler_t):
         # English
         else:
             query_text = (
-                "You are a senior reverse-engineering assistant. Analyze the function using both [Pseudocode] and "
-                "[Full Function Assembly], and strictly follow this output format in English:\n"
+                "You are a senior reverse-engineering assistant. Analyze the function using all provided information, "
+                "and strictly follow this output format in English:\n"
                 "---WPeChat_START---\n"
                 "1. Function summary: 2-4 sentences about core purpose.\n"
                 "2. Parameters and return value: explain each item; mark uncertain parts as \"inferred\".\n"
                 "3. Key execution flow: step-by-step control/data flow, branches, loops, and calls.\n"
-                "4. Key evidence: cite concise pseudocode/assembly clues (addresses or instruction patterns).\n"
-                "5. Risks or suspicious behavior: memory issues, bypass logic, dangerous APIs, etc.\n"
-                "6. Suggested function name: provide one best name and 2-3 alternatives.\n"
+                "4. Call relationship analysis: based on cross-references, explain this function's role in the program.\n"
+                "5. Key evidence: cite concise pseudocode/assembly/string clues (addresses or instruction patterns).\n"
+                "6. Risks or suspicious behavior: memory issues, bypass logic, dangerous APIs, etc.\n"
+                "7. Suggested function name: provide one best name and 2-3 alternatives.\n"
                 "---WPeChat_END---\n"
-                "\n[Pseudocode]\n" + str(decompiler_output) +
+                "\n[Function Metadata]\n" + metadata_info +
+                "\n\n[Cross-Reference Information]\n" + xrefs_info +
+                ("\n\n" + strings_info if strings_info else "") +
+                "\n\n[Pseudocode]\n" + str(decompiler_output) +
                 "\n\n[Full Function Assembly]\n" + assembly_output
             )
             query_model_async(
@@ -596,6 +608,123 @@ def get_function_assembly(address):
             lines.append("%s: %s" % (hex(ea), idaapi.tag_remove(disasm)))
         ea = idc.next_head(ea, func.end_ea)
     return "\n".join(lines)
+
+
+
+
+def get_function_xrefs(address):
+    """
+    获取函数的交叉引用信息（调用者和被调用者）
+    """
+    func = idaapi.get_func(address)
+    if not func:
+        return ""
+
+    result = []
+
+    # 获取调用此函数的地方（xrefs to）
+    xrefs_to = []
+    for xref in idautils.XrefsTo(func.start_ea, 0):
+        caller_name = idc.get_func_name(xref.frm)
+        if caller_name:
+            xrefs_to.append("  - %s (%s)" % (caller_name, hex(xref.frm)))
+
+    if xrefs_to:
+        result.append("被以下函数调用:")
+        result.extend(xrefs_to[:10])  # 限制显示前10个
+        if len(xrefs_to) > 10:
+            result.append("  ... 还有 %d 个调用" % (len(xrefs_to) - 10))
+
+    # 获取此函数调用的其他函数（xrefs from）
+    xrefs_from = []
+    ea = func.start_ea
+    while ea < func.end_ea:
+        for xref in idautils.XrefsFrom(ea, 0):
+            callee_name = idc.get_func_name(xref.to)
+            if callee_name and callee_name != idc.get_func_name(func.start_ea):
+                xrefs_from.append("  - %s (%s)" % (callee_name, hex(xref.to)))
+        ea = idc.next_head(ea, func.end_ea)
+
+    if xrefs_from:
+        result.append("\n调用了以下函数:")
+        # 去重
+        unique_xrefs = list(set(xrefs_from))
+        result.extend(unique_xrefs[:15])  # 限制显示前15个
+        if len(unique_xrefs) > 15:
+            result.append("  ... 还有 %d 个调用" % (len(unique_xrefs) - 15))
+
+    return "\n".join(result) if result else "无交叉引用信息"
+
+
+def get_function_strings(address):
+    """
+    获取函数中引用的字符串
+    """
+    func = idaapi.get_func(address)
+    if not func:
+        return ""
+
+    strings = []
+    ea = func.start_ea
+    while ea < func.end_ea:
+        for xref in idautils.XrefsFrom(ea, 0):
+            # 检查是否是字符串引用
+            str_type = idc.get_str_type(xref.to)
+            if str_type is not None:
+                string_content = idc.get_strlit_contents(xref.to)
+                if string_content:
+                    try:
+                        decoded = string_content.decode('utf-8', errors='ignore')
+                        if len(decoded) > 2:  # 过滤太短的字符串
+                            strings.append("  - \"%s\" @ %s" % (decoded[:100], hex(xref.to)))  # 限制字符串长度
+                    except:
+                        pass
+        ea = idc.next_head(ea, func.end_ea)
+
+    if strings:
+        unique_strings = list(set(strings))
+        result = "函数中的字符串:\n" + "\n".join(unique_strings[:20])
+        if len(unique_strings) > 20:
+            result += "\n  ... 还有 %d 个字符串" % (len(unique_strings) - 20)
+        return result
+    return ""
+
+
+def get_function_metadata(address):
+    """
+    获取函数的元数据信息
+    """
+    func = idaapi.get_func(address)
+    if not func:
+        return ""
+
+    info = []
+    func_name = idc.get_func_name(func.start_ea)
+
+    # 函数基本信息
+    info.append("函数名: %s" % func_name)
+    info.append("起始地址: %s" % hex(func.start_ea))
+    info.append("结束地址: %s" % hex(func.end_ea))
+    info.append("函数大小: %d 字节" % (func.end_ea - func.start_ea))
+
+    # 检查是否是导入/导出函数
+    seg_name = idc.get_segm_name(func.start_ea)
+    if seg_name in [".plt", ".idata", "__stubs"]:
+        info.append("类型: 导入函数")
+    elif idaapi.is_public_name(func.start_ea):
+        info.append("类型: 导出函数")
+    else:
+        info.append("类型: 内部函数")
+
+    # 段信息
+    if seg_name:
+        info.append("所在段: %s" % seg_name)
+
+    # 统计基本块数量
+    flowchart = idaapi.FlowChart(func)
+    info.append("基本块数量: %d" % flowchart.size)
+
+    return "\n".join(info)
 
 
 # Add context menu actions
